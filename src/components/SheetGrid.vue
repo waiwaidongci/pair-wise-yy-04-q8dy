@@ -36,6 +36,8 @@ const visibleCols = computed(() => {
 })
 const frozenRows = computed(() => Array.from({ length: store.freezeRows }, (_, index) => index))
 const frozenCols = computed(() => Array.from({ length: store.freezeCols }, (_, index) => index))
+const columnHeaders = computed(() => Array.from(new Set([...frozenCols.value, ...visibleCols.value])))
+const rowHeaders = computed(() => Array.from(new Set([...frozenRows.value, ...visibleRows.value])))
 
 function xForCol(col: number) {
   if (col < store.freezeCols) return HEADER_W + col * CELL_W
@@ -51,6 +53,16 @@ function onScroll() {
   if (!viewport.value) return
   scrollTop.value = viewport.value.scrollTop
   scrollLeft.value = viewport.value.scrollLeft
+}
+
+function isColumnHeaderSelected(col: number) {
+  const range = normalizeRange(store.selection)
+  return range.start.row === 0 && range.end.row === store.rows - 1 && col >= range.start.col && col <= range.end.col
+}
+
+function isRowHeaderSelected(row: number) {
+  const range = normalizeRange(store.selection)
+  return range.start.col === 0 && range.end.col === store.cols - 1 && row >= range.start.row && row <= range.end.row
 }
 
 function selectCell(row: number, col: number, event?: MouseEvent) {
@@ -178,20 +190,22 @@ onUnmounted(() => {
 
     <div class="corner" :style="{ width: `${HEADER_W}px`, height: `${HEADER_H}px` }" />
     <div
-      v-for="col in visibleCols"
+      v-for="col in columnHeaders"
       :key="`col-${col}`"
       class="column-header"
-      :class="{ frozen: col < store.freezeCols }"
+      :class="{ frozen: col < store.freezeCols, 'header-selected': isColumnHeaderSelected(col) }"
       :style="{ left: `${xForCol(col)}px`, width: `${CELL_W}px`, height: `${HEADER_H}px` }"
+      @mousedown.prevent="store.selectEntireColumn(col, $event.shiftKey); viewport?.focus()"
     >
       {{ columnLabel(col) }}
     </div>
     <div
-      v-for="row in visibleRows"
+      v-for="row in rowHeaders"
       :key="`row-${row}`"
       class="row-header"
-      :class="{ frozen: row < store.freezeRows }"
+      :class="{ frozen: row < store.freezeRows, 'header-selected': isRowHeaderSelected(row) }"
       :style="{ top: `${yForRow(row)}px`, width: `${HEADER_W}px`, height: `${CELL_H}px` }"
+      @mousedown.prevent="store.selectEntireRow(row, $event.shiftKey); viewport?.focus()"
     >
       {{ row + 1 }}
     </div>
@@ -292,6 +306,7 @@ onUnmounted(() => {
   border-bottom: 1px solid #c8d2df;
   font-size: 11px;
   font-weight: 700;
+  cursor: pointer;
 }
 .row-header {
   z-index: 6;
@@ -303,7 +318,9 @@ onUnmounted(() => {
   border-right: 1px solid #c8d2df;
   border-bottom: 1px solid #e0e6ee;
   font-size: 11px;
+  cursor: pointer;
 }
+.column-header.header-selected, .row-header.header-selected { background: #cfe0fb; color: #1d4ed8; }
 .column-header.frozen, .row-header.frozen { background: #e8eef7; color: #28476f; }
 .cell {
   z-index: 2;

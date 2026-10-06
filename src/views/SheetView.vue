@@ -26,7 +26,7 @@ const store = useSheetStore()
     <FormulaBar />
     <main class="sheet-main"><SheetGrid /></main>
     <footer class="sheet-status">
-      <span>方向键导航 · Shift+方向键扩展选区 · Ctrl/Cmd+C/V 复制粘贴 · F2 编辑</span>
+      <span>点击行/列标题整行整列选中 · 工具栏插入/移除行列，公式引用自动迁移 · F2 编辑 · Ctrl/Cmd+Z 撤销</span>
       <span>循环引用：拖入或粘贴 “=A1” 类公式会自动显示 #CYCLE!</span>
       <strong>{{ store.status }}</strong>
     </footer>

@@ -1,11 +1,13 @@
 import type { FormulaAst } from '../types/sheet'
-import { cellId, expandRange, parseCellId } from './cells'
+import { cellId, columnLabel, expandRange, parseCellId } from './cells'
 
-type TokenType = 'number' | 'string' | 'reference' | 'identifier' | 'operator' | 'leftParen' | 'rightParen' | 'comma' | 'colon'
+type TokenType = 'number' | 'string' | 'error' | 'reference' | 'identifier' | 'operator' | 'leftParen' | 'rightParen' | 'comma' | 'colon'
 
 interface Token {
   type: TokenType
   value: string
+  start: number
+  end: number
 }
 
 export class FormulaError extends Error {
@@ -17,7 +19,11 @@ export class FormulaError extends Error {
 function tokenize(input: string): Token[] {
   const tokens: Token[] = []
   let index = 0
+  const push = (type: TokenType, value: string, start: number) => {
+    tokens.push({ type, value, start, end: index })
+  }
   while (index < input.length) {
+    const start = index
     const char = input[index]
     if (/\s/.test(char)) {
       index += 1
@@ -33,44 +39,53 @@ function tokenize(input: string): Token[] {
       }
       if (input[index] !== '"') throw new FormulaError('#PARSE!')
       index += 1
-      tokens.push({ type: 'string', value })
+      // 字符串 token 的 value 保留原文（含引号），供结构变更时原样回填
+      push('string', input.slice(start, index), start)
       continue
+    }
+    if (char === '#') {
+      const errorMatch = /^#[A-Z0-9/]+!?/i.exec(input.slice(index))
+      if (errorMatch) {
+        index += errorMatch[0].length
+        push('error', errorMatch[0].toUpperCase(), start)
+        continue
+      }
     }
     const number = /^-?\d+(\.\d+)?/.exec(input.slice(index))
     if (number) {
-      tokens.push({ type: 'number', value: number[0] })
       index += number[0].length
+      push('number', number[0], start)
       continue
     }
     const reference = /^\$?[A-Z]+\$?\d+/i.exec(input.slice(index))
     if (reference) {
-      tokens.push({ type: 'reference', value: reference[0].replace(/\$/g, '').toUpperCase() })
+      // 保留 $ 绝对引用标记，仅统一大小写；解析坐标时再剥离 $
       index += reference[0].length
+      push('reference', reference[0].toUpperCase(), start)
       continue
     }
     const identifier = /^[A-Z_][A-Z0-9_]*/i.exec(input.slice(index))
     if (identifier) {
-      tokens.push({ type: 'identifier', value: identifier[0].toUpperCase() })
       index += identifier[0].length
+      push('identifier', identifier[0].toUpperCase(), start)
       continue
     }
     const twoChar = input.slice(index, index + 2)
     if (['<=', '>=', '<>'].includes(twoChar)) {
-      tokens.push({ type: 'operator', value: twoChar })
       index += 2
+      push('operator', twoChar, start)
       continue
     }
     if ('+-*/^%=<>'.includes(char)) {
-      tokens.push({ type: 'operator', value: char })
       index += 1
+      push('operator', char, start)
       continue
     }
-    if (char === '(') tokens.push({ type: 'leftParen', value: char })
-    else if (char === ')') tokens.push({ type: 'rightParen', value: char })
-    else if (char === ',') tokens.push({ type: 'comma', value: char })
-    else if (char === ':') tokens.push({ type: 'colon', value: char })
+    if (char === '(') { index += 1; push('leftParen', char, start) }
+    else if (char === ')') { index += 1; push('rightParen', char, start) }
+    else if (char === ',') { index += 1; push('comma', char, start) }
+    else if (char === ':') { index += 1; push('colon', char, start) }
     else throw new FormulaError('#PARSE!')
-    index += 1
   }
   return tokens
 }
@@ -119,7 +134,8 @@ class Parser {
     const token = this.consume()
     if (!token) throw new FormulaError('#PARSE!')
     if (token.type === 'number') return { type: 'number', value: Number(token.value) }
-    if (token.type === 'string') return { type: 'string', value: token.value }
+    if (token.type === 'string') return { type: 'string', value: token.value.slice(1, -1) }
+    if (token.type === 'error') return { type: 'error', value: token.value }
     if (token.type === 'reference') {
       if (this.peek()?.type === 'colon') {
         this.consume()
@@ -177,8 +193,12 @@ function scalar(value: unknown): unknown {
 
 export function evaluateAst(ast: FormulaAst, resolveRef: (id: string) => unknown, resolveRange: (range: string) => unknown[]): unknown {
   if (ast.type === 'number' || ast.type === 'string' || ast.type === 'boolean') return ast.value
-  if (ast.type === 'reference') return resolveRef(String(ast.value))
-  if (ast.type === 'range') return resolveRange(String(ast.value))
+  if (ast.type === 'error') throw new FormulaError(String(ast.value))
+  if (ast.type === 'reference') return resolveRef(normalizeReference(String(ast.value)))
+  if (ast.type === 'range') {
+    const [start, end] = String(ast.value).split(':')
+    return resolveRange(`${normalizeReference(start)}:${normalizeReference(end)}`)
+  }
   if (ast.type === 'unary') {
     const value = numberValue(evaluateAst(ast.left!, resolveRef, resolveRange))
     return ast.operator === '-' ? -value : value
@@ -238,7 +258,7 @@ export function evaluateAst(ast: FormulaAst, resolveRef: (id: string) => unknown
 }
 
 export function collectDependencies(ast: FormulaAst, result = new Set<string>()): Set<string> {
-  if (ast.type === 'reference' && ast.value) result.add(String(ast.value))
+  if (ast.type === 'reference' && ast.value) result.add(normalizeReference(String(ast.value)))
   if (ast.type === 'range' && ast.value) {
     const [start, end] = String(ast.value).split(':')
     expandRange(start, end).forEach((id) => result.add(id))
@@ -261,3 +281,121 @@ export function normalizeReference(id: string): string {
   const coord = parseCellId(id)
   return coord ? cellId(coord.row, coord.col) : id
 }
+
+export interface AxisShift {
+  /** true=插入，false=移除 */
+  insert: boolean
+  /** 行轴为行索引（0 起），列轴为列索引（0 起） */
+  index: number
+  /** 插入/移除的条数 */
+  count: number
+  /** 表上限，超出的索引判为越界（无对应位置） */
+  limit: number
+}
+
+interface RefParts {
+  absCol: boolean
+  col: number
+  absRow: boolean
+  row: number
+}
+
+function parseRefParts(token: string): RefParts | null {
+  const match = /^\$?([A-Z]+)\$?\d+$/i.exec(token)
+  const coord = parseCellId(token)
+  if (!match || !coord) return null
+  const dollarCol = /^\$/.test(token)
+  const dollarRow = /\$\d+$/.test(token)
+  return { absCol: dollarCol, col: coord.col, absRow: dollarRow, row: coord.row }
+}
+
+function formatRefParts(parts: RefParts): string {
+  return `${parts.absCol ? '$' : ''}${columnLabel(parts.col)}${parts.absRow ? '$' : ''}${parts.row + 1}`
+}
+
+function shiftCoord(value: number, shift: AxisShift): number | null {
+  if (shift.insert) {
+    if (value >= shift.index) {
+      const next = value + shift.count
+      return next < shift.limit ? next : null
+    }
+    return value
+  }
+  if (value >= shift.index && value < shift.index + shift.count) return null
+  if (value >= shift.index + shift.count) {
+    const next = value - shift.count
+    return next < shift.limit ? next : null
+  }
+  return value
+}
+
+/**
+ * 迁移单个引用的一维坐标：绝对引用钉住不动；相对引用越过插入点/移除点后移位；
+ * 引用目标落在被移除区间（或插入后越过表边界）时返回 null。
+ */
+function movePart(parts: RefParts, axis: 'row' | 'col', shift: AxisShift): RefParts | null {
+  const absolute = axis === 'row' ? parts.absRow : parts.absCol
+  if (absolute) return parts
+  const current = axis === 'row' ? parts.row : parts.col
+  const next = shiftCoord(current, shift)
+  if (next === null) return null
+  return axis === 'row' ? { ...parts, row: next } : { ...parts, col: next }
+}
+
+function shiftRefToken(token: string, rowShift?: AxisShift, colShift?: AxisShift): string | null {
+  const parts = parseRefParts(token)
+  if (!parts) return token
+  if (colShift) {
+    const next = movePart(parts, 'col', colShift)
+    if (!next) return null
+    Object.assign(parts, next)
+  }
+  if (rowShift) {
+    const next = movePart(parts, 'row', rowShift)
+    if (!next) return null
+    Object.assign(parts, next)
+  }
+  return formatRefParts(parts)
+}
+
+/**
+ * 按结构变更重写整个公式文本。单个引用/区域引用各自迁移，区域两端独立判断；
+ * 任一端失去对应位置，该引用整体替换为 #REF!。字符串字面量与无法解析的公式原样保留。
+ */
+export function rewriteFormula(formula: string, rowShift?: AxisShift, colShift?: AxisShift): string {
+  if (!formula.startsWith('=')) return formula
+  const body = formula.slice(1)
+  let tokens: Token[]
+  try {
+    tokens = tokenize(body)
+  } catch {
+    return formula
+  }
+  let output = ''
+  let cursor = 0
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]
+    output += body.slice(cursor, token.start)
+    if (token.type !== 'reference') {
+      output += token.type === 'string' ? token.value : token.value
+      cursor = token.end
+      continue
+    }
+    const nextToken = tokens[i + 1]
+    const endToken = tokens[i + 2]
+    if (nextToken?.type === 'colon' && endToken?.type === 'reference') {
+      const first = shiftRefToken(token.value, rowShift, colShift)
+      const second = shiftRefToken(endToken.value, rowShift, colShift)
+      output += first && second ? `${first}:${second}` : '#REF!'
+      i += 2
+      cursor = endToken.end
+    } else {
+      const moved = shiftRefToken(token.value, rowShift, colShift)
+      output += moved ?? '#REF!'
+      cursor = token.end
+    }
+  }
+  output += body.slice(cursor)
+  return `=${output}`
+}
+

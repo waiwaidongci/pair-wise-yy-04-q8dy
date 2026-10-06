@@ -17,7 +17,7 @@ export interface CellRange {
 }
 
 export interface FormulaAst {
-  type: 'number' | 'string' | 'boolean' | 'reference' | 'range' | 'binary' | 'unary' | 'function'
+  type: 'number' | 'string' | 'boolean' | 'error' | 'reference' | 'range' | 'binary' | 'unary' | 'function'
   value?: string | number | boolean
   left?: FormulaAst
   right?: FormulaAst
