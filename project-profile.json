@@ -1,0 +1,11 @@
+{
+  "projectId": "pair-wise-yy-04",
+  "projectName": "GridFormula 类电子表格公式编辑器",
+  "category": "表格与公式",
+  "businessDomain": "研发工具",
+  "projectForm": "完整项目",
+  "codeScope": "frontend",
+  "languages": "Vue 3, TypeScript, Vuetify, Pinia, Vue Router, Vite",
+  "summary": "虚拟滚动表格编辑器，支持公式解析、区域引用、循环引用检测、增量重算、撤销重做与导出。",
+  "containerized": false
+}
