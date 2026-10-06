@@ -64,6 +64,26 @@ function enterCell(row: number, col: number) {
   if (selecting.value) store.setSelectionEnd(row, col)
 }
 
+function selectRow(row: number) {
+  store.setSelectionRange({ start: { row, col: 0 }, end: { row, col: store.cols - 1 } })
+  viewport.value?.focus()
+}
+
+function selectColumn(col: number) {
+  store.setSelectionRange({ start: { row: 0, col }, end: { row: store.rows - 1, col } })
+  viewport.value?.focus()
+}
+
+function rowSelected(row: number) {
+  const range = normalizeRange(store.selection)
+  return row >= range.start.row && row <= range.end.row && range.start.col === 0 && range.end.col === store.cols - 1
+}
+
+function colSelected(col: number) {
+  const range = normalizeRange(store.selection)
+  return col >= range.start.col && col <= range.end.col && range.start.row === 0 && range.end.row === store.rows - 1
+}
+
 function startEdit(row?: number, col?: number) {
   const target = row === undefined || col === undefined ? store.active : { row, col }
   store.setActive(target.row, target.col)
@@ -181,8 +201,9 @@ onUnmounted(() => {
       v-for="col in visibleCols"
       :key="`col-${col}`"
       class="column-header"
-      :class="{ frozen: col < store.freezeCols }"
+      :class="{ frozen: col < store.freezeCols, 'header-selected': colSelected(col) }"
       :style="{ left: `${xForCol(col)}px`, width: `${CELL_W}px`, height: `${HEADER_H}px` }"
+      @click="selectColumn(col)"
     >
       {{ columnLabel(col) }}
     </div>
@@ -190,8 +211,9 @@ onUnmounted(() => {
       v-for="row in visibleRows"
       :key="`row-${row}`"
       class="row-header"
-      :class="{ frozen: row < store.freezeRows }"
+      :class="{ frozen: row < store.freezeRows, 'header-selected': rowSelected(row) }"
       :style="{ top: `${yForRow(row)}px`, width: `${HEADER_W}px`, height: `${CELL_H}px` }"
+      @click="selectRow(row)"
     >
       {{ row + 1 }}
     </div>
@@ -305,6 +327,7 @@ onUnmounted(() => {
   font-size: 11px;
 }
 .column-header.frozen, .row-header.frozen { background: #e8eef7; color: #28476f; }
+.column-header.header-selected, .row-header.header-selected { background: #dbe7f6; color: #1d4ed8; }
 .cell {
   z-index: 2;
   display: flex;

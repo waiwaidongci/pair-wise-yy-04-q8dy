@@ -32,6 +32,11 @@ const activeLabel = computed(() => `${columnLabel(store.active.col)}${store.acti
         <v-btn :value="1" size="small">冻结首列</v-btn>
       </v-btn-toggle>
       <v-btn size="small" variant="text" prepend-icon="mdi-delete-outline" @click="store.clearSelection">清除内容</v-btn>
+      <v-divider vertical class="mx-2" />
+      <v-btn size="small" variant="text" prepend-icon="mdi-table-row-plus-after" @click="store.insertRows">插入行</v-btn>
+      <v-btn size="small" variant="text" prepend-icon="mdi-table-row-remove" @click="store.deleteRows">删除行</v-btn>
+      <v-btn size="small" variant="text" prepend-icon="mdi-table-column-plus-after" @click="store.insertCols">插入列</v-btn>
+      <v-btn size="small" variant="text" prepend-icon="mdi-table-column-remove" @click="store.deleteCols">删除列</v-btn>
     </div>
     <div class="toolbar-right">
       <span class="active-badge">{{ activeLabel }}</span>

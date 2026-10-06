@@ -1,8 +1,8 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import type { CellCoord, CellMap, CellRange, CellRecord, CellValue } from '../types/sheet'
-import { cellId, displayValue, literalValue, normalizeRange, rangeContains } from '../utils/cells'
-import { FormulaError, evaluateAst, formulaDependencies, parseFormula } from '../utils/formula'
+import { cellId, displayValue, literalValue, normalizeRange, parseCellId, rangeContains } from '../utils/cells'
+import { applyCellCoord, FormulaError, evaluateAst, formulaDependencies, migrateFormula, parseFormula, type DimensionOp } from '../utils/formula'
 
 const ROWS = 1000
 const COLS = 26
@@ -116,7 +116,7 @@ export const useSheetStore = defineStore('sheet', () => {
     return affected
   }
 
-  function recalculate(ids: Set<string>) {
+  function recalculate(ids: Set<string>, quiet = false) {
     const resolved = new Map<string, CellValue>()
     const failedCycles = new Set<string>()
 
@@ -172,8 +172,10 @@ export const useSheetStore = defineStore('sheet', () => {
         }
       }
     })
-    lastRecalculated.value = [...ids]
-    status.value = `已重算 ${ids.size} 个受影响单元格`
+    if (!quiet) {
+      lastRecalculated.value = [...ids]
+      status.value = `已重算 ${ids.size} 个受影响单元格`
+    }
   }
 
   function snapshot(): HistorySnapshot {
@@ -213,6 +215,184 @@ export const useSheetStore = defineStore('sheet', () => {
       })
     })
     recalculate(affectedCells(changed))
+  }
+
+  function setSelectionRange(range: CellRange) {
+    const normalized = normalizeRange(range)
+    active.value = { row: normalized.start.row, col: normalized.start.col }
+    selection.value = normalized
+  }
+
+  /**
+   * Move the active/selection coordinate for a structural operation.
+   * Insert keeps the selection at the new empty region; delete clamps to the removal point.
+   */
+  function shiftCoord(coord: number, op: DimensionOp, max: number): number {
+    if (op.kind === 'insert') {
+      if (coord >= op.at) return Math.min(coord + op.count, max - 1)
+      return coord
+    }
+    if (coord >= op.at && coord < op.at + op.count) return op.at
+    if (coord >= op.at + op.count) return coord - op.count
+    return coord
+  }
+
+  function structureAffected(movedIds: string[], movedFromIds: string[], rewrittenIds: string[], deletedIds: string[]): Set<string> {
+    const map = dependencyMap()
+    const affected = new Set<string>()
+    const queue: string[] = []
+    const add = (id: string) => {
+      if (!id || affected.has(id)) return
+      affected.add(id)
+      queue.push(id)
+    }
+    movedIds.forEach(add)
+    movedFromIds.forEach(add)
+    rewrittenIds.forEach(add)
+    deletedIds.forEach(add)
+    while (queue.length) {
+      const id = queue.shift()!
+      for (const dependent of map.get(id) ?? []) add(dependent)
+    }
+    return affected
+  }
+
+  function nextFrame() {
+    return new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve())
+      else setTimeout(resolve, 0)
+    })
+  }
+
+  /**
+   * Recalculate affected formulas in batches grouped by worksheet rows,
+   * yielding to the browser between batches so large structural operations
+   * (e.g. inserting a column across a 1000-row sheet) stay responsive.
+   */
+  async function recalculateBatched(ids: Set<string>, batchRows = 120) {
+    const byRow = new Map<number, string[]>()
+    ids.forEach((id) => {
+      const coord = parseCellId(id)
+      if (!coord) return
+      if (!byRow.has(coord.row)) byRow.set(coord.row, [])
+      byRow.get(coord.row)!.push(id)
+    })
+    const rowList = [...byRow.keys()].sort((a, b) => a - b)
+    let done = 0
+    for (let i = 0; i < rowList.length; i += batchRows) {
+      const batch = new Set<string>()
+      for (let j = i; j < rowList.length && j < i + batchRows; j += 1) {
+        byRow.get(rowList[j])!.forEach((id) => batch.add(id))
+      }
+      recalculate(batch, true)
+      done += batch.size
+      lastRecalculated.value = [...batch]
+      status.value = `已分批重算 ${done}/${ids.size} 个受影响公式`
+      await nextFrame()
+    }
+    if (!ids.size) status.value = '结构调整完成，无需重算公式'
+  }
+
+  function applyStructureOp(op: DimensionOp) {
+    recordHistory()
+    const rowOp = op.dimension === 'row' ? op : null
+    const colOp = op.dimension === 'col' ? op : null
+    const max = op.dimension === 'row' ? rows : cols
+    const newCells: CellMap = {}
+    const movedIds: string[] = []
+    const movedFromIds: string[] = []
+    const rewrittenIds: string[] = []
+    const deletedIds: string[] = []
+
+    Object.entries(cells.value).forEach(([id, record]) => {
+      const coord = parseCellId(id)!
+      const cellCoord = op.dimension === 'row' ? coord.row : coord.col
+      const nextCoord = applyCellCoord(cellCoord, op, max)
+      if (nextCoord === null) {
+        deletedIds.push(id)
+        return
+      }
+      const nextRow = op.dimension === 'row' ? nextCoord : coord.row
+      const nextCol = op.dimension === 'col' ? nextCoord : coord.col
+      const nextId = cellId(nextRow, nextCol)
+      let raw = record.raw
+      if (raw.startsWith('=')) {
+        try {
+          const migrated = migrateFormula(raw, rowOp, colOp, rows, cols)
+          if (migrated !== raw) {
+            raw = migrated
+            rewrittenIds.push(nextId)
+          }
+        } catch {
+          // Keep the original formula if it cannot be parsed/migrated.
+        }
+      }
+      newCells[nextId] = { raw, value: raw.startsWith('=') ? null : literalValue(raw) }
+      if (nextId !== id) {
+        movedIds.push(nextId)
+        movedFromIds.push(id)
+      }
+    })
+
+    cells.value = newCells
+
+    active.value = {
+      row: rowOp ? shiftCoord(active.value.row, rowOp, rows) : active.value.row,
+      col: colOp ? shiftCoord(active.value.col, colOp, cols) : active.value.col,
+    }
+    selection.value = {
+      start: {
+        row: rowOp ? shiftCoord(selection.value.start.row, rowOp, rows) : selection.value.start.row,
+        col: colOp ? shiftCoord(selection.value.start.col, colOp, cols) : selection.value.start.col,
+      },
+      end: {
+        row: rowOp ? shiftCoord(selection.value.end.row, rowOp, rows) : selection.value.end.row,
+        col: colOp ? shiftCoord(selection.value.end.col, colOp, cols) : selection.value.end.col,
+      },
+    }
+
+    if (rowOp && rowOp.at < freezeRows.value) {
+      freezeRows.value = rowOp.kind === 'insert'
+        ? Math.min(rows, freezeRows.value + rowOp.count)
+        : Math.max(0, freezeRows.value - rowOp.count)
+    }
+    if (colOp && colOp.at < freezeCols.value) {
+      freezeCols.value = colOp.kind === 'insert'
+        ? Math.min(cols, freezeCols.value + colOp.count)
+        : Math.max(0, freezeCols.value - colOp.count)
+    }
+
+    void recalculateBatched(structureAffected(movedIds, movedFromIds, rewrittenIds, deletedIds))
+    const target = op.dimension === 'row' ? '行' : '列'
+    status.value = `${op.kind === 'insert' ? '已插入' : '已删除'}${target}，公式引用正在跟随迁移`
+  }
+
+  function insertRows() {
+    const range = normalizeRange(selection.value)
+    const at = range.start.row
+    const count = Math.max(1, range.end.row - range.start.row + 1)
+    applyStructureOp({ kind: 'insert', dimension: 'row', at, count })
+  }
+
+  function deleteRows() {
+    const range = normalizeRange(selection.value)
+    const at = range.start.row
+    const count = Math.max(1, range.end.row - range.start.row + 1)
+    applyStructureOp({ kind: 'delete', dimension: 'row', at, count })
+  }
+
+  function insertCols() {
+    const range = normalizeRange(selection.value)
+    const at = range.start.col
+    const count = Math.max(1, range.end.col - range.start.col + 1)
+    applyStructureOp({ kind: 'insert', dimension: 'col', at, count })
+  }
+
+  function deleteCols() {
+    const range = normalizeRange(selection.value)
+    const at = range.start.col
+    const count = Math.max(1, range.end.col - range.start.col + 1)
+    applyStructureOp({ kind: 'delete', dimension: 'col', at, count })
   }
 
   function setActive(row: number, col: number, extend = false) {
@@ -262,22 +442,24 @@ export const useSheetStore = defineStore('sheet', () => {
     const previous = history.value.pop()
     if (!previous) return
     future.value.push(snapshot())
+    // Restore formulas and their computed values together from the snapshot.
     cells.value = previous.cells
     active.value = previous.active
     selection.value = previous.selection
-    recalculate(new Set(Object.keys(cells.value)))
-    status.value = '已撤销上一步编辑'
+    lastRecalculated.value = []
+    status.value = '已撤销，公式与结果值已一起还原'
   }
 
   function redo() {
     const next = future.value.pop()
     if (!next) return
     history.value.push(snapshot())
+    // Restore formulas and their computed values together from the snapshot.
     cells.value = next.cells
     active.value = next.active
     selection.value = next.selection
-    recalculate(new Set(Object.keys(cells.value)))
-    status.value = '已恢复编辑'
+    lastRecalculated.value = []
+    status.value = '已重做，公式与结果值已一起还原'
   }
 
   function isSelected(row: number, col: number) {
@@ -336,6 +518,11 @@ export const useSheetStore = defineStore('sheet', () => {
     setManyRaw,
     setActive,
     setSelectionEnd,
+    setSelectionRange,
+    insertRows,
+    deleteRows,
+    insertCols,
+    deleteCols,
     selectedMatrix,
     selectedText,
     pasteText,

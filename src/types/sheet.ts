@@ -16,9 +16,21 @@ export interface CellRange {
   end: CellCoord
 }
 
+export interface CellRef {
+  row: number
+  col: number
+  rowAbs: boolean
+  colAbs: boolean
+}
+
+export type FormulaErrorCode = '#REF!' | '#CYCLE!' | '#NAME?' | '#VALUE!' | '#DIV/0!' | '#PARSE!' | '#FORMULA!'
+
 export interface FormulaAst {
-  type: 'number' | 'string' | 'boolean' | 'reference' | 'range' | 'binary' | 'unary' | 'function'
+  type: 'number' | 'string' | 'boolean' | 'reference' | 'range' | 'binary' | 'unary' | 'function' | 'error'
   value?: string | number | boolean
+  ref?: CellRef
+  startRef?: CellRef
+  endRef?: CellRef
   left?: FormulaAst
   right?: FormulaAst
   operator?: string
